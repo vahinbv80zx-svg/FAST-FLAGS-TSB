@@ -6,23 +6,27 @@ from discord import app_commands
 from discord.ext import commands
 
 # --- CONFIGURATION ---
-TOKEN = os.getenv("DISCORD_TOKEN")
+TOKEN = os.environ.get("DISCORD_TOKEN")
 LB_FILE = "leaderboards.json"
 HEADER_GIF = "https://cdn.discordapp.com/attachments/1496355649502580757/1496377599662755931/WHITE-1.gif?ex=69e9a9bd&is=69e8583d&hm=cae7913688d5a686d7d1da1248509c23b11bacf17387fef4a9d546e6ae9874a7&"
 VACANT_THUMB = "https://cdn.discordapp.com/attachments/1496355649502580757/1496377629501030400/Black_question_mark.png?ex=69e9a9c4&is=69e85844&hm=c5f1e8c59fb5aff7c11f84e43133b22c7785163c20b0c150b5caf04095e32eb6&"
 
 # --- DATA PERSISTENCE HELPERS ---
 def get_lb(guild_id):
-    if not os.path.exists(LB_FILE): return {}
-    with open(LB_FILE, "r") as f:
-        data = json.load(f)
-    return data.get(str(guild_id))
+    if not os.path.exists(LB_FILE): return None
+    try:
+        with open(LB_FILE, "r") as f:
+            data = json.load(f)
+        return data.get(str(guild_id))
+    except: return None
 
 def set_lb(guild_id, lb_data):
     data = {}
     if os.path.exists(LB_FILE):
-        with open(LB_FILE, "r") as f:
-            data = json.load(f)
+        try:
+            with open(LB_FILE, "r") as f:
+                data = json.load(f)
+        except: data = {}
     data[str(guild_id)] = lb_data
     with open(LB_FILE, "w") as f:
         json.dump(data, f, indent=4)
@@ -46,15 +50,14 @@ class IntegratedBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
-        # This syncs ALL commands attached to this bot instance
         await self.tree.sync()
 
     async def on_ready(self):
-        print(f"Logged in as {self.user} | Commands Synced Successfully")
+        print(f"Logged in as {self.user}")
 
 bot = IntegratedBot()
 
-# ---------- LEADERBOARD LOGIC ----------
+# ---------- LEADERBOARD RENDERING ----------
 def build_spot_embed(spot):
     desc = (
         f"| `{spot['discord']}` |\n"
@@ -82,7 +85,8 @@ async def refresh_leaderboard(guild: discord.Guild):
     spots = lb["spots"]
     new_ids = []
     for i in range(0, len(spots), 10):
-        embeds = [build_spot_embed(s) for s in spots[i:i+10]]
+        group = spots[i:i+10]
+        embeds = [build_spot_embed(s) for s in group]
         msg = await channel.send(embeds=embeds)
         new_ids.append(str(msg.id))
         
@@ -90,7 +94,7 @@ async def refresh_leaderboard(guild: discord.Guild):
     set_lb(guild.id, lb)
 
 # ---------- LEADERBOARD COMMANDS ----------
-@bot.tree.command(name="createlb", description="Create a leaderboard.")
+@bot.tree.command(name="createlb", description="Create a leaderboard range (max 50 spots).")
 async def createlb_cmd(interaction: discord.Interaction, spot_range: str, channel: discord.TextChannel):
     await interaction.response.defer(ephemeral=True)
     if not has_permission(interaction):
@@ -99,22 +103,25 @@ async def createlb_cmd(interaction: discord.Interaction, spot_range: str, channe
         a, b = spot_range.split("-")
         start, end = int(a.strip()), int(b.strip())
     except:
-        await interaction.followup.send("❌ Invalid range (e.g. 1-10)."); return
+        await interaction.followup.send("❌ Invalid range format. Use e.g. `1-10`."); return
 
     spots = [vacant_spot(n) for n in range(start, end + 1)]
     set_lb(interaction.guild.id, {"channel_id": str(channel.id), "message_ids": [], "spots": spots})
     await interaction.followup.send(f"✅ Leaderboard created in {channel.mention}.")
     asyncio.create_task(refresh_leaderboard(interaction.guild))
 
-@bot.tree.command(name="fillspot", description="Fill a leaderboard spot")
+@bot.tree.command(name="fillspot", description="Update a player's leaderboard spot.")
 async def fillspot_cmd(interaction: discord.Interaction, spot: int, username: str, discord_handle: str, roblox: str, country: str, stage: str, thumbnail_url: str):
     await interaction.response.defer(ephemeral=True)
     if not has_permission(interaction):
         await interaction.followup.send("❌ No permission."); return
     lb = get_lb(interaction.guild.id)
-    idx = next((i for i, s in enumerate(lb["spots"]) if s["num"] == spot), None) if lb else None
+    if not lb:
+        await interaction.followup.send("❌ Create a leaderboard first."); return
+    
+    idx = next((i for i, s in enumerate(lb["spots"]) if s["num"] == spot), None)
     if idx is None:
-        await interaction.followup.send("❌ Spot not found."); return
+        await interaction.followup.send("❌ Spot number not found."); return
     
     lb["spots"][idx] = {
         "num": spot, "username": username, "discord": discord_handle,
@@ -131,20 +138,51 @@ class FlagDropdown(discord.ui.Select):
         options = [
             discord.SelectOption(label="Unlock FPS", description="DFIntTaskSchedulerTargetFps"),
             discord.SelectOption(label="Remove Shadows", description="FIntRenderShadowIntensity"),
+            discord.SelectOption(label="Disable Post-Process", description="FFlagDisablePostProcess"),
+            discord.SelectOption(label="Voxel Lighting", description="DFFlagDebugRenderForceTechnologyVoxel"),
+            discord.SelectOption(label="No Anti-Aliasing", description="FIntAntialiasingQuality"),
+            discord.SelectOption(label="No Grass", description="FIntFRMMaxGrassDistance"),
+            discord.SelectOption(label="Light Culling", description="FFlagDebugForceFSMCPULightCulling"),
             discord.SelectOption(label="How to Setup", description="Installation guide for flags"),
-        ] # Add your other options here as needed
-        super().__init__(placeholder="Choose a legal flag...", options=options)
+        ]
+        super().__init__(placeholder="Choose a flag...", options=options)
 
     async def callback(self, interaction: discord.Interaction):
         selection = self.values[0]
-        if selection == "How to Setup":
-            content = "1. Go to %LocalAppData%\\Roblox\\Versions\n2. Open latest version folder\n3. Create ClientSettings folder\n4. Create ClientAppSettings.json inside."
-        else:
-            content = f"Code for {selection}: 
-http://googleusercontent.com/immersive_entry_chip/0
+        
+        flag_data = {
+            "Unlock FPS": ("\"DFIntTaskSchedulerTargetFps\": 999", "Removes the 60 FPS cap."),
+            "Remove Shadows": ("\"FIntRenderShadowIntensity\": 0", "Disables shadows for FPS gains."),
+            "Disable Post-Process": ("\"FFlagDisablePostProcess\": \"True\"", "Removes blur and bloom."),
+            "Voxel Lighting": ("\"DFFlagDebugRenderForceTechnologyVoxel\": \"True\"", "Fastest lighting engine."),
+            "No Anti-Aliasing": ("\"FIntAntialiasingQuality\": 0", "Disables edge smoothing."),
+            "No Grass": ("\"FIntFRMMaxGrassDistance\": 0", "Stops rendering distant grass."),
+            "Light Culling": ("\"FFlagDebugForceFSMCPULightCulling\": \"True\"", "Optimizes light calculation.")
+        }
 
-### What was fixed:
-* **Variable Overwriting:** Removed the second `bot = FlagBot()` which was deleting your leaderboard commands.
-* **Unified Intents:** Combined the required intents (members and guilds) into one place.
-* **Persistent Storage Helpers:** Added the `get_lb`, `set_lb`, and `vacant_spot` functions. Without these, your script would have crashed with a `NameError` the moment you tried to use `/createlb`.
-* **Synced Setup:** Used `IntegratedBot.setup_hook` to ensure that every time the bot starts on Railway, it tells Discord about **every** command in the script at once.
+        if selection == "How to Setup":
+            setup_embed = discord.Embed(
+                title="How to Setup Flags",
+                description="1. Win + R -> `%LocalAppData%\\Roblox\\Versions`\n2. Open latest version folder\n3. Create `ClientSettings` folder\n4. Create `ClientAppSettings.json` file inside.\n5. Paste flags inside `{ }`.",
+                color=discord.Color.green()
+            )
+            await interaction.response.send_message(embed=setup_embed, ephemeral=True)
+        else:
+            code, info = flag_data[selection]
+            # Formatted carefully to avoid SyntaxErrors
+            msg_text = f"**What it does:** {info}\n\n**Code:**\n```json\n{{ {code} }}\n```"
+            flag_embed = discord.Embed(title=f"Flag: {selection}", description=msg_text, color=discord.Color.red())
+            await interaction.response.send_message(embed=flag_embed, ephemeral=True)
+
+class FlagView(discord.ui.View):
+    def __init__(self):
+        super().__init__()
+        self.add_item(FlagDropdown())
+
+@bot.tree.command(name="flags", description="Get legal optimization flags for TSB")
+async def flags_cmd(interaction: discord.Interaction):
+    intro_embed = discord.Embed(title="TSB Flags", description="Select an option below:", color=discord.Color.blue())
+    await interaction.response.send_message(embed=intro_embed, view=FlagView(), ephemeral=True)
+
+if __name__ == "__main__":
+    bot.run(TOKEN)
