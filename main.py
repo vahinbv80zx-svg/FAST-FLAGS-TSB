@@ -16,20 +16,17 @@ def get_lb(guild_id):
     if not os.path.exists(LB_FILE): return None
     try:
         with open(LB_FILE, "r") as f:
-            data = json.load(f)
-        return data.get(str(guild_id))
+            return json.load(f).get(str(guild_id))
     except: return None
 
 def set_lb(guild_id, lb_data):
     data = {}
     if os.path.exists(LB_FILE):
         try:
-            with open(LB_FILE, "r") as f:
-                data = json.load(f)
-        except: data = {}
+            with open(LB_FILE, "r") as f: data = json.load(f)
+        except: pass
     data[str(guild_id)] = lb_data
-    with open(LB_FILE, "w") as f:
-        json.dump(data, f, indent=4)
+    with open(LB_FILE, "w") as f: json.dump(data, f, indent=4)
 
 def vacant_spot(n):
     return {"num": n, "username": "Vacant", "discord": "None", "roblox": "None", "country": "None", "stage": "None", "thumbnail": None, "vacant": True}
@@ -37,24 +34,14 @@ def vacant_spot(n):
 # --- BOT SETUP ---
 class IntegratedBot(commands.Bot):
     def __init__(self):
-        intents = discord.Intents.default()
-        intents.members = True
-        intents.guilds = True
-        super().__init__(command_prefix="!", intents=intents)
+        super().__init__(command_prefix="!", intents=discord.Intents.all())
 
     async def setup_hook(self):
         await self.tree.sync()
 
 bot = IntegratedBot()
 
-# --- UTILS ---
-def build_spot_embed(spot):
-    desc = f"| `{spot['discord']}` |\n«« | • {spot['roblox']} • | »»\n**Country :** {spot['country']}\n**Stage :** {spot['stage']}"
-    embed = discord.Embed(title=f"{spot['num']} - {spot['username']}", description=desc, color=0x2B2D31)
-    embed.set_image(url=HEADER_GIF)
-    embed.set_thumbnail(url=spot.get("thumbnail") or VACANT_THUMB)
-    return embed
-
+# --- REFRESH LOGIC ---
 async def refresh_leaderboard(guild: discord.Guild):
     lb = get_lb(guild.id)
     if not lb: return
@@ -63,28 +50,34 @@ async def refresh_leaderboard(guild: discord.Guild):
     
     spots = lb["spots"]
     message_ids = lb.get("message_ids", [])
-    updated_ids = []
-    needed_msgs = (len(spots) + 9) // 10
-
-    for i in range(needed_msgs):
+    new_ids = []
+    
+    # 10 spots per embed/message
+    needed = (len(spots) + 9) // 10
+    
+    for i in range(needed):
         group = spots[i*10:(i+10)]
-        embeds = [build_spot_embed(s) for s in group]
-        
-        msg_sent = False
+        embeds = []
+        for s in group:
+            desc = f"| `{s['discord']}` |\n«« | • {s['roblox']} • | »»\n**Country :** {s['country']}\n**Stage :** {s['stage']}"
+            e = discord.Embed(title=f"{s['num']} - {s['username']}", description=desc, color=0x2B2D31)
+            e.set_image(url=HEADER_GIF)
+            e.set_thumbnail(url=s.get("thumbnail") or VACANT_THUMB)
+            embeds.append(e)
+
+        msg = None
         if i < len(message_ids):
             try:
                 msg = await channel.fetch_message(int(message_ids[i]))
                 await msg.edit(embeds=embeds)
-                updated_ids.append(str(msg.id))
-                msg_sent = True
             except:
-                pass # If edit fails, we'll send a new one below
+                msg = await channel.send(embeds=embeds)
+        else:
+            msg = await channel.send(embeds=embeds)
+            
+        if msg: new_ids.append(str(msg.id))
         
-        if not msg_sent:
-            new_msg = await channel.send(embeds=embeds)
-            updated_ids.append(str(new_msg.id))
-        
-    lb["message_ids"] = updated_ids
+    lb["message_ids"] = new_ids
     set_lb(guild.id, lb)
 
 # --- COMMANDS ---
@@ -92,30 +85,28 @@ async def refresh_leaderboard(guild: discord.Guild):
 async def createlb(interaction: discord.Interaction, spot_range: str, channel: discord.TextChannel):
     await interaction.response.defer(ephemeral=True)
     try:
-        a, b = spot_range.split("-")
-        start, end = int(a.strip()), int(b.strip())
+        start, end = map(int, spot_range.split("-"))
         spots = [vacant_spot(n) for n in range(start, end + 1)]
-        # Reset IDs on a fresh createlb
         set_lb(interaction.guild.id, {"channel_id": str(channel.id), "message_ids": [], "spots": spots})
-        await interaction.followup.send("✅ Leaderboard initialized.")
         await refresh_leaderboard(interaction.guild)
-    except Exception as e:
-        await interaction.followup.send(f"❌ Error: {e}")
+        await interaction.followup.send("✅ Leaderboard Created.")
+    except:
+        await interaction.followup.send("❌ Error. Use format 1-10.")
 
 @bot.tree.command(name="fillspot")
 async def fillspot(interaction: discord.Interaction, spot: int, username: str, discord_handle: str, roblox: str, country: str, stage: str, thumbnail_url: str):
     await interaction.response.defer(ephemeral=True)
     lb = get_lb(interaction.guild.id)
     if not lb:
-        await interaction.followup.send("❌ Use /createlb first.")
+        await interaction.followup.send("❌ No leaderboard found.")
         return
         
     idx = next((i for i, s in enumerate(lb["spots"]) if s["num"] == spot), None)
     if idx is not None:
         lb["spots"][idx] = {"num": spot, "username": username, "discord": discord_handle, "roblox": roblox, "country": country, "stage": stage, "thumbnail": thumbnail_url, "vacant": False}
         set_lb(interaction.guild.id, lb)
-        await refresh_leaderboard(interaction.guild) # Wait for this to finish to ensure save
-        await interaction.followup.send(f"✅ Spot {spot} updated.")
+        await refresh_leaderboard(interaction.guild)
+        await interaction.followup.send(f"✅ Updated spot {spot}.")
     else:
         await interaction.followup.send("❌ Spot not found.")
 
@@ -123,7 +114,6 @@ async def fillspot(interaction: discord.Interaction, spot: int, username: str, d
 async def removeplayer(interaction: discord.Interaction, spot: int):
     await interaction.response.defer(ephemeral=True)
     lb = get_lb(interaction.guild.id)
-    if not lb: return
     idx = next((i for i, s in enumerate(lb["spots"]) if s["num"] == spot), None)
     if idx is not None:
         lb["spots"][idx] = vacant_spot(spot)
@@ -132,9 +122,9 @@ async def removeplayer(interaction: discord.Interaction, spot: int):
         await interaction.followup.send("✅ Player removed.")
 
 @bot.tree.command(name="flags")
-async def flags_cmd(interaction: discord.Interaction):
-    # (Kept the simple version to avoid any potential syntax crashes)
-    await interaction.response.send_message("Check /flags again after the update!", ephemeral=True)
+async def flags(interaction: discord.Interaction):
+    # This is a basic response to ensure no crashes
+    await interaction.response.send_message("Optimization flags can be found in the ClientSettings guide.", ephemeral=True)
 
 if __name__ == "__main__":
     bot.run(TOKEN)
