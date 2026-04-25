@@ -11,7 +11,7 @@ LB_FILE = "leaderboards.json"
 HEADER_GIF = "https://cdn.discordapp.com/attachments/1496355649502580757/1496377599662755931/WHITE-1.gif?ex=69e9a9bd&is=69e8583d&hm=cae7913688d5a686d7d1da1248509c23b11bacf17387fef4a9d546e6ae9874a7&"
 VACANT_THUMB = "https://cdn.discordapp.com/attachments/1496355649502580757/1496377629501030400/Black_question_mark.png?ex=69e9a9c4&is=69e85844&hm=c5f1e8c59fb5aff7c11f84e43133b22c7785163c20b0c150b5caf04095e32eb6&"
 
-# --- DATA PERSISTENCE HELPERS ---
+# --- DATA HELPERS ---
 def get_lb(guild_id):
     if not os.path.exists(LB_FILE): return None
     try:
@@ -32,14 +32,7 @@ def set_lb(guild_id, lb_data):
         json.dump(data, f, indent=4)
 
 def vacant_spot(n):
-    return {
-        "num": n, "username": "Vacant", "discord": "None",
-        "roblox": "None", "country": "None", "stage": "None",
-        "thumbnail": None, "vacant": True
-    }
-
-def has_permission(interaction):
-    return interaction.user.guild_permissions.administrator
+    return {"num": n, "username": "Vacant", "discord": "None", "roblox": "None", "country": "None", "stage": "None", "thumbnail": None, "vacant": True}
 
 # --- BOT CLASS ---
 class IntegratedBot(commands.Bot):
@@ -52,19 +45,11 @@ class IntegratedBot(commands.Bot):
     async def setup_hook(self):
         await self.tree.sync()
 
-    async def on_ready(self):
-        print(f"Logged in as {self.user}")
-
 bot = IntegratedBot()
 
-# ---------- LEADERBOARD UTILS ----------
+# --- LEADERBOARD LOGIC ---
 def build_spot_embed(spot):
-    desc = (
-        f"| `{spot['discord']}` |\n"
-        f"«« | • {spot['roblox']} • | »»\n"
-        f"**Country :** {spot['country']}\n"
-        f"**Stage :** {spot['stage']}"
-    )
+    desc = f"| `{spot['discord']}` |\n«« | • {spot['roblox']} • | »»\n**Country :** {spot['country']}\n**Stage :** {spot['stage']}"
     embed = discord.Embed(title=f"{spot['num']} - {spot['username']}", description=desc, color=0x2B2D31)
     embed.set_image(url=HEADER_GIF)
     embed.set_thumbnail(url=spot.get("thumbnail") or VACANT_THUMB)
@@ -76,95 +61,81 @@ async def refresh_leaderboard(guild: discord.Guild):
     channel = guild.get_channel(int(lb["channel_id"]))
     if not channel: return
     
-    # Delete old messages
-    for mid in lb.get("message_ids", []):
-        try:
-            msg = await channel.fetch_message(int(mid))
-            await msg.delete()
-        except: pass
-            
-    # Send new messages
     spots = lb["spots"]
+    message_ids = lb.get("message_ids", [])
     new_ids = []
-    for i in range(0, len(spots), 10):
-        group = spots[i:i+10]
+    needed_msgs = (len(spots) + 9) // 10
+
+    for i in range(needed_msgs):
+        group = spots[i*10:(i+10)]
         embeds = [build_spot_embed(s) for s in group]
-        msg = await channel.send(embeds=embeds)
-        new_ids.append(str(msg.id))
+        
+        msg = None
+        if i < len(message_ids):
+            try:
+                msg = await channel.fetch_message(int(message_ids[i]))
+                await msg.edit(embeds=embeds)
+            except:
+                msg = await channel.send(embeds=embeds)
+        else:
+            msg = await channel.send(embeds=embeds)
+            
+        if msg: new_ids.append(str(msg.id))
         
     lb["message_ids"] = new_ids
     set_lb(guild.id, lb)
 
-# ---------- LEADERBOARD COMMANDS ----------
-@bot.tree.command(name="createlb", description="Create leaderboard range (e.g. 1-10)")
-async def createlb_cmd(interaction: discord.Interaction, spot_range: str, channel: discord.TextChannel):
+# --- COMMANDS ---
+@bot.tree.command(name="createlb", description="Create leaderboard")
+async def createlb(interaction: discord.Interaction, spot_range: str, channel: discord.TextChannel):
     await interaction.response.defer(ephemeral=True)
-    if not has_permission(interaction):
-        await interaction.followup.send("❌ No permission."); return
     try:
         a, b = spot_range.split("-")
         start, end = int(a.strip()), int(b.strip())
+        spots = [vacant_spot(n) for n in range(start, end + 1)]
+        set_lb(interaction.guild.id, {"channel_id": str(channel.id), "message_ids": [], "spots": spots})
+        await interaction.followup.send("✅ Leaderboard Created.")
+        await refresh_leaderboard(interaction.guild)
     except:
-        await interaction.followup.send("❌ Invalid range format."); return
+        await interaction.followup.send("❌ Error. Use format 1-10.")
 
-    spots = [vacant_spot(n) for n in range(start, end + 1)]
-    set_lb(interaction.guild.id, {"channel_id": str(channel.id), "message_ids": [], "spots": spots})
-    await interaction.followup.send(f"✅ Created in {channel.mention}.")
-    asyncio.create_task(refresh_leaderboard(interaction.guild))
-
-@bot.tree.command(name="fillspot", description="Update a spot")
-async def fillspot_cmd(interaction: discord.Interaction, spot: int, username: str, discord_handle: str, roblox: str, country: str, stage: str, thumbnail_url: str):
+@bot.tree.command(name="fillspot", description="Update a player")
+async def fillspot(interaction: discord.Interaction, spot: int, username: str, discord_handle: str, roblox: str, country: str, stage: str, thumbnail_url: str):
     await interaction.response.defer(ephemeral=True)
     lb = get_lb(interaction.guild.id)
-    if not lb:
-        await interaction.followup.send("❌ No leaderboard found."); return
-    
+    if not lb: return
     idx = next((i for i, s in enumerate(lb["spots"]) if s["num"] == spot), None)
-    if idx is None:
-        await interaction.followup.send("❌ Invalid spot."); return
-    
-    lb["spots"][idx] = {
-        "num": spot, "username": username, "discord": discord_handle,
-        "roblox": roblox, "country": country, "stage": stage,
-        "thumbnail": thumbnail_url, "vacant": False,
-    }
-    set_lb(interaction.guild.id, lb)
-    await interaction.followup.send(f"✅ Spot {spot} updated.")
-    asyncio.create_task(refresh_leaderboard(interaction.guild))
+    if idx is not None:
+        lb["spots"][idx] = {"num": spot, "username": username, "discord": discord_handle, "roblox": roblox, "country": country, "stage": stage, "thumbnail": thumbnail_url, "vacant": False}
+        set_lb(interaction.guild.id, lb)
+        await refresh_leaderboard(interaction.guild)
+        await interaction.followup.send(f"✅ Spot {spot} updated.")
 
-@bot.tree.command(name="moveup", description="Move a player up")
+@bot.tree.command(name="moveup")
 async def moveup(interaction: discord.Interaction, spot: int):
     await interaction.response.defer(ephemeral=True)
     lb = get_lb(interaction.guild.id)
     idx = next((i for i, s in enumerate(lb["spots"]) if s["num"] == spot), None)
-    if idx is None or idx == 0:
-        await interaction.followup.send("❌ Cannot move up."); return
-    
-    # Swap spots but keep the numbers sequential
-    lb["spots"][idx], lb["spots"][idx-1] = lb["spots"][idx-1], lb["spots"][idx]
-    # Re-assign spot numbers so they stay 1, 2, 3...
-    for i, s in enumerate(lb["spots"]): s["num"] = i + 1 
-    
-    set_lb(interaction.guild.id, lb)
-    await interaction.followup.send(f"✅ Moved spot {spot} up.")
-    asyncio.create_task(refresh_leaderboard(interaction.guild))
+    if idx is not None and idx > 0:
+        lb["spots"][idx], lb["spots"][idx-1] = lb["spots"][idx-1], lb["spots"][idx]
+        for i, s in enumerate(lb["spots"]): s["num"] = i + 1
+        set_lb(interaction.guild.id, lb)
+        await refresh_leaderboard(interaction.guild)
+        await interaction.followup.send("✅ Moved up.")
 
-@bot.tree.command(name="movedown", description="Move a player down")
+@bot.tree.command(name="movedown")
 async def movedown(interaction: discord.Interaction, spot: int):
     await interaction.response.defer(ephemeral=True)
     lb = get_lb(interaction.guild.id)
     idx = next((i for i, s in enumerate(lb["spots"]) if s["num"] == spot), None)
-    if idx is None or idx >= len(lb["spots"]) - 1:
-        await interaction.followup.send("❌ Cannot move down."); return
-    
-    lb["spots"][idx], lb["spots"][idx+1] = lb["spots"][idx+1], lb["spots"][idx]
-    for i, s in enumerate(lb["spots"]): s["num"] = i + 1 
-    
-    set_lb(interaction.guild.id, lb)
-    await interaction.followup.send(f"✅ Moved spot {spot} down.")
-    asyncio.create_task(refresh_leaderboard(interaction.guild))
+    if idx is not None and idx < len(lb["spots"]) - 1:
+        lb["spots"][idx], lb["spots"][idx+1] = lb["spots"][idx+1], lb["spots"][idx]
+        for i, s in enumerate(lb["spots"]): s["num"] = i + 1
+        set_lb(interaction.guild.id, lb)
+        await refresh_leaderboard(interaction.guild)
+        await interaction.followup.send("✅ Moved down.")
 
-@bot.tree.command(name="removeplayer", description="Clear a spot")
+@bot.tree.command(name="removeplayer")
 async def removeplayer(interaction: discord.Interaction, spot: int):
     await interaction.response.defer(ephemeral=True)
     lb = get_lb(interaction.guild.id)
@@ -172,26 +143,33 @@ async def removeplayer(interaction: discord.Interaction, spot: int):
     if idx is not None:
         lb["spots"][idx] = vacant_spot(spot)
         set_lb(interaction.guild.id, lb)
-        await interaction.followup.send(f"✅ Spot {spot} cleared.")
-        asyncio.create_task(refresh_leaderboard(interaction.guild))
+        await refresh_leaderboard(interaction.guild)
+        await interaction.followup.send("✅ Removed.")
 
-# ---------- FLAGS COMMAND ----------
+# --- FLAGS DROPDOWN LOGIC ---
 class FlagDropdown(discord.ui.Select):
     def __init__(self):
         options = [
             discord.SelectOption(label="Unlock FPS", value="fps"),
             discord.SelectOption(label="Remove Shadows", value="shadows"),
+            discord.SelectOption(label="No Grass", value="grass"),
             discord.SelectOption(label="How to Setup", value="setup")
         ]
         super().__init__(placeholder="Choose a flag...", options=options)
 
     async def callback(self, interaction: discord.Interaction):
+        data = {
+            "fps": ("\"DFIntTaskSchedulerTargetFps\": 999", "Removes the 60 FPS cap."),
+            "shadows": ("\"FIntRenderShadowIntensity\": 0", "Disables shadows."),
+            "grass": ("\"FIntFRMMaxGrassDistance\": 0", "Removes grass.")
+        }
         if self.values[0] == "setup":
             await interaction.response.send_message("1. Win+R -> `%LocalAppData%\\Roblox\\Versions`\n2. Open latest folder\n3. Create `ClientSettings` folder\n4. Create `ClientAppSettings.json` inside.", ephemeral=True)
         else:
-            await interaction.response.send_message(f"Selected: {self.values[0]}", ephemeral=True)
+            code, desc = data[self.values[0]]
+            await interaction.response.send_message(f"**{desc}**\n```json\n{{ {code} }}\n```", ephemeral=True)
 
-@bot.tree.command(name="flags", description="Legal optimization flags")
+@bot.tree.command(name="flags", description="TSB Flags")
 async def flags_cmd(interaction: discord.Interaction):
     view = discord.ui.View(); view.add_item(FlagDropdown())
     await interaction.response.send_message("Select an option:", view=view, ephemeral=True)
