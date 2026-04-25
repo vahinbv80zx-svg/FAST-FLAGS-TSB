@@ -41,7 +41,7 @@ def vacant_spot(n):
 def has_permission(interaction):
     return interaction.user.guild_permissions.administrator
 
-# --- BOT CLASS SETUP ---
+# --- BOT CLASS ---
 class IntegratedBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
@@ -57,7 +57,7 @@ class IntegratedBot(commands.Bot):
 
 bot = IntegratedBot()
 
-# ---------- LEADERBOARD RENDERING ----------
+# ---------- LEADERBOARD UTILS ----------
 def build_spot_embed(spot):
     desc = (
         f"| `{spot['discord']}` |\n"
@@ -76,12 +76,14 @@ async def refresh_leaderboard(guild: discord.Guild):
     channel = guild.get_channel(int(lb["channel_id"]))
     if not channel: return
     
+    # Delete old messages
     for mid in lb.get("message_ids", []):
         try:
             msg = await channel.fetch_message(int(mid))
             await msg.delete()
         except: pass
             
+    # Send new messages
     spots = lb["spots"]
     new_ids = []
     for i in range(0, len(spots), 10):
@@ -94,7 +96,7 @@ async def refresh_leaderboard(guild: discord.Guild):
     set_lb(guild.id, lb)
 
 # ---------- LEADERBOARD COMMANDS ----------
-@bot.tree.command(name="createlb", description="Create a leaderboard range (max 50 spots).")
+@bot.tree.command(name="createlb", description="Create leaderboard range (e.g. 1-10)")
 async def createlb_cmd(interaction: discord.Interaction, spot_range: str, channel: discord.TextChannel):
     await interaction.response.defer(ephemeral=True)
     if not has_permission(interaction):
@@ -103,25 +105,23 @@ async def createlb_cmd(interaction: discord.Interaction, spot_range: str, channe
         a, b = spot_range.split("-")
         start, end = int(a.strip()), int(b.strip())
     except:
-        await interaction.followup.send("❌ Invalid range format. Use e.g. `1-10`."); return
+        await interaction.followup.send("❌ Invalid range format."); return
 
     spots = [vacant_spot(n) for n in range(start, end + 1)]
     set_lb(interaction.guild.id, {"channel_id": str(channel.id), "message_ids": [], "spots": spots})
-    await interaction.followup.send(f"✅ Leaderboard created in {channel.mention}.")
+    await interaction.followup.send(f"✅ Created in {channel.mention}.")
     asyncio.create_task(refresh_leaderboard(interaction.guild))
 
-@bot.tree.command(name="fillspot", description="Update a player's leaderboard spot.")
+@bot.tree.command(name="fillspot", description="Update a spot")
 async def fillspot_cmd(interaction: discord.Interaction, spot: int, username: str, discord_handle: str, roblox: str, country: str, stage: str, thumbnail_url: str):
     await interaction.response.defer(ephemeral=True)
-    if not has_permission(interaction):
-        await interaction.followup.send("❌ No permission."); return
     lb = get_lb(interaction.guild.id)
     if not lb:
-        await interaction.followup.send("❌ Create a leaderboard first."); return
+        await interaction.followup.send("❌ No leaderboard found."); return
     
     idx = next((i for i, s in enumerate(lb["spots"]) if s["num"] == spot), None)
     if idx is None:
-        await interaction.followup.send("❌ Spot number not found."); return
+        await interaction.followup.send("❌ Invalid spot."); return
     
     lb["spots"][idx] = {
         "num": spot, "username": username, "discord": discord_handle,
@@ -132,57 +132,69 @@ async def fillspot_cmd(interaction: discord.Interaction, spot: int, username: st
     await interaction.followup.send(f"✅ Spot {spot} updated.")
     asyncio.create_task(refresh_leaderboard(interaction.guild))
 
-# ---------- FLAG OPTIMIZATION LOGIC ----------
+@bot.tree.command(name="moveup", description="Move a player up")
+async def moveup(interaction: discord.Interaction, spot: int):
+    await interaction.response.defer(ephemeral=True)
+    lb = get_lb(interaction.guild.id)
+    idx = next((i for i, s in enumerate(lb["spots"]) if s["num"] == spot), None)
+    if idx is None or idx == 0:
+        await interaction.followup.send("❌ Cannot move up."); return
+    
+    # Swap spots but keep the numbers sequential
+    lb["spots"][idx], lb["spots"][idx-1] = lb["spots"][idx-1], lb["spots"][idx]
+    # Re-assign spot numbers so they stay 1, 2, 3...
+    for i, s in enumerate(lb["spots"]): s["num"] = i + 1 
+    
+    set_lb(interaction.guild.id, lb)
+    await interaction.followup.send(f"✅ Moved spot {spot} up.")
+    asyncio.create_task(refresh_leaderboard(interaction.guild))
+
+@bot.tree.command(name="movedown", description="Move a player down")
+async def movedown(interaction: discord.Interaction, spot: int):
+    await interaction.response.defer(ephemeral=True)
+    lb = get_lb(interaction.guild.id)
+    idx = next((i for i, s in enumerate(lb["spots"]) if s["num"] == spot), None)
+    if idx is None or idx >= len(lb["spots"]) - 1:
+        await interaction.followup.send("❌ Cannot move down."); return
+    
+    lb["spots"][idx], lb["spots"][idx+1] = lb["spots"][idx+1], lb["spots"][idx]
+    for i, s in enumerate(lb["spots"]): s["num"] = i + 1 
+    
+    set_lb(interaction.guild.id, lb)
+    await interaction.followup.send(f"✅ Moved spot {spot} down.")
+    asyncio.create_task(refresh_leaderboard(interaction.guild))
+
+@bot.tree.command(name="removeplayer", description="Clear a spot")
+async def removeplayer(interaction: discord.Interaction, spot: int):
+    await interaction.response.defer(ephemeral=True)
+    lb = get_lb(interaction.guild.id)
+    idx = next((i for i, s in enumerate(lb["spots"]) if s["num"] == spot), None)
+    if idx is not None:
+        lb["spots"][idx] = vacant_spot(spot)
+        set_lb(interaction.guild.id, lb)
+        await interaction.followup.send(f"✅ Spot {spot} cleared.")
+        asyncio.create_task(refresh_leaderboard(interaction.guild))
+
+# ---------- FLAGS COMMAND ----------
 class FlagDropdown(discord.ui.Select):
     def __init__(self):
         options = [
-            discord.SelectOption(label="Unlock FPS", description="DFIntTaskSchedulerTargetFps"),
-            discord.SelectOption(label="Remove Shadows", description="FIntRenderShadowIntensity"),
-            discord.SelectOption(label="Disable Post-Process", description="FFlagDisablePostProcess"),
-            discord.SelectOption(label="Voxel Lighting", description="DFFlagDebugRenderForceTechnologyVoxel"),
-            discord.SelectOption(label="No Anti-Aliasing", description="FIntAntialiasingQuality"),
-            discord.SelectOption(label="No Grass", description="FIntFRMMaxGrassDistance"),
-            discord.SelectOption(label="Light Culling", description="FFlagDebugForceFSMCPULightCulling"),
-            discord.SelectOption(label="How to Setup", description="Installation guide for flags"),
+            discord.SelectOption(label="Unlock FPS", value="fps"),
+            discord.SelectOption(label="Remove Shadows", value="shadows"),
+            discord.SelectOption(label="How to Setup", value="setup")
         ]
         super().__init__(placeholder="Choose a flag...", options=options)
 
     async def callback(self, interaction: discord.Interaction):
-        selection = self.values[0]
-        
-        flag_data = {
-            "Unlock FPS": ("\"DFIntTaskSchedulerTargetFps\": 999", "Removes the 60 FPS cap."),
-            "Remove Shadows": ("\"FIntRenderShadowIntensity\": 0", "Disables shadows for FPS gains."),
-            "Disable Post-Process": ("\"FFlagDisablePostProcess\": \"True\"", "Removes blur and bloom."),
-            "Voxel Lighting": ("\"DFFlagDebugRenderForceTechnologyVoxel\": \"True\"", "Fastest lighting engine."),
-            "No Anti-Aliasing": ("\"FIntAntialiasingQuality\": 0", "Disables edge smoothing."),
-            "No Grass": ("\"FIntFRMMaxGrassDistance\": 0", "Stops rendering distant grass."),
-            "Light Culling": ("\"FFlagDebugForceFSMCPULightCulling\": \"True\"", "Optimizes light calculation.")
-        }
-
-        if selection == "How to Setup":
-            setup_embed = discord.Embed(
-                title="How to Setup Flags",
-                description="1. Win + R -> `%LocalAppData%\\Roblox\\Versions`\n2. Open latest version folder\n3. Create `ClientSettings` folder\n4. Create `ClientAppSettings.json` file inside.\n5. Paste flags inside `{ }`.",
-                color=discord.Color.green()
-            )
-            await interaction.response.send_message(embed=setup_embed, ephemeral=True)
+        if self.values[0] == "setup":
+            await interaction.response.send_message("1. Win+R -> `%LocalAppData%\\Roblox\\Versions`\n2. Open latest folder\n3. Create `ClientSettings` folder\n4. Create `ClientAppSettings.json` inside.", ephemeral=True)
         else:
-            code, info = flag_data[selection]
-            # Formatted carefully to avoid SyntaxErrors
-            msg_text = f"**What it does:** {info}\n\n**Code:**\n```json\n{{ {code} }}\n```"
-            flag_embed = discord.Embed(title=f"Flag: {selection}", description=msg_text, color=discord.Color.red())
-            await interaction.response.send_message(embed=flag_embed, ephemeral=True)
+            await interaction.response.send_message(f"Selected: {self.values[0]}", ephemeral=True)
 
-class FlagView(discord.ui.View):
-    def __init__(self):
-        super().__init__()
-        self.add_item(FlagDropdown())
-
-@bot.tree.command(name="flags", description="Get legal optimization flags for TSB")
+@bot.tree.command(name="flags", description="Legal optimization flags")
 async def flags_cmd(interaction: discord.Interaction):
-    intro_embed = discord.Embed(title="TSB Flags", description="Select an option below:", color=discord.Color.blue())
-    await interaction.response.send_message(embed=intro_embed, view=FlagView(), ephemeral=True)
+    view = discord.ui.View(); view.add_item(FlagDropdown())
+    await interaction.response.send_message("Select an option:", view=view, ephemeral=True)
 
 if __name__ == "__main__":
     bot.run(TOKEN)
