@@ -34,7 +34,7 @@ def set_lb(guild_id, lb_data):
 def vacant_spot(n):
     return {"num": n, "username": "Vacant", "discord": "None", "roblox": "None", "country": "None", "stage": "None", "thumbnail": None, "vacant": True}
 
-# --- BOT CLASS ---
+# --- BOT SETUP ---
 class IntegratedBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
@@ -45,9 +45,12 @@ class IntegratedBot(commands.Bot):
     async def setup_hook(self):
         await self.tree.sync()
 
+    async def on_ready(self):
+        print(f"Logged in as {self.user}")
+
 bot = IntegratedBot()
 
-# --- LEADERBOARD LOGIC ---
+# --- UTILS ---
 def build_spot_embed(spot):
     desc = f"| `{spot['discord']}` |\n«« | • {spot['roblox']} • | »»\n**Country :** {spot['country']}\n**Stage :** {spot['stage']}"
     embed = discord.Embed(title=f"{spot['num']} - {spot['username']}", description=desc, color=0x2B2D31)
@@ -86,7 +89,7 @@ async def refresh_leaderboard(guild: discord.Guild):
     set_lb(guild.id, lb)
 
 # --- COMMANDS ---
-@bot.tree.command(name="createlb", description="Create leaderboard")
+@bot.tree.command(name="createlb")
 async def createlb(interaction: discord.Interaction, spot_range: str, channel: discord.TextChannel):
     await interaction.response.defer(ephemeral=True)
     try:
@@ -94,59 +97,69 @@ async def createlb(interaction: discord.Interaction, spot_range: str, channel: d
         start, end = int(a.strip()), int(b.strip())
         spots = [vacant_spot(n) for n in range(start, end + 1)]
         set_lb(interaction.guild.id, {"channel_id": str(channel.id), "message_ids": [], "spots": spots})
-        await interaction.followup.send("✅ Leaderboard Created.")
-        await refresh_leaderboard(interaction.guild)
+        await interaction.followup.send("✅ Leaderboard created.")
+        asyncio.create_task(refresh_leaderboard(interaction.guild))
     except:
-        await interaction.followup.send("❌ Error. Use format 1-10.")
+        await interaction.followup.send("❌ Error. Use 1-10.")
 
-@bot.tree.command(name="fillspot", description="Update a player")
+@bot.tree.command(name="fillspot")
 async def fillspot(interaction: discord.Interaction, spot: int, username: str, discord_handle: str, roblox: str, country: str, stage: str, thumbnail_url: str):
+    # This 'defer' stops the "thinking" error
     await interaction.response.defer(ephemeral=True)
     lb = get_lb(interaction.guild.id)
-    if not lb: return
+    if not lb:
+        await interaction.followup.send("❌ No leaderboard found.")
+        return
+        
     idx = next((i for i, s in enumerate(lb["spots"]) if s["num"] == spot), None)
     if idx is not None:
         lb["spots"][idx] = {"num": spot, "username": username, "discord": discord_handle, "roblox": roblox, "country": country, "stage": stage, "thumbnail": thumbnail_url, "vacant": False}
         set_lb(interaction.guild.id, lb)
-        await refresh_leaderboard(interaction.guild)
-        await interaction.followup.send(f"✅ Spot {spot} updated.")
+        # Run refresh in the background so the command finishes fast
+        asyncio.create_task(refresh_leaderboard(interaction.guild))
+        await interaction.followup.send(f"✅ Updated spot {spot}.")
+    else:
+        await interaction.followup.send("❌ Spot not found.")
 
 @bot.tree.command(name="moveup")
 async def moveup(interaction: discord.Interaction, spot: int):
     await interaction.response.defer(ephemeral=True)
     lb = get_lb(interaction.guild.id)
+    if not lb: return
     idx = next((i for i, s in enumerate(lb["spots"]) if s["num"] == spot), None)
     if idx is not None and idx > 0:
         lb["spots"][idx], lb["spots"][idx-1] = lb["spots"][idx-1], lb["spots"][idx]
         for i, s in enumerate(lb["spots"]): s["num"] = i + 1
         set_lb(interaction.guild.id, lb)
-        await refresh_leaderboard(interaction.guild)
+        asyncio.create_task(refresh_leaderboard(interaction.guild))
         await interaction.followup.send("✅ Moved up.")
 
 @bot.tree.command(name="movedown")
 async def movedown(interaction: discord.Interaction, spot: int):
     await interaction.response.defer(ephemeral=True)
     lb = get_lb(interaction.guild.id)
+    if not lb: return
     idx = next((i for i, s in enumerate(lb["spots"]) if s["num"] == spot), None)
     if idx is not None and idx < len(lb["spots"]) - 1:
         lb["spots"][idx], lb["spots"][idx+1] = lb["spots"][idx+1], lb["spots"][idx]
         for i, s in enumerate(lb["spots"]): s["num"] = i + 1
         set_lb(interaction.guild.id, lb)
-        await refresh_leaderboard(interaction.guild)
+        asyncio.create_task(refresh_leaderboard(interaction.guild))
         await interaction.followup.send("✅ Moved down.")
 
 @bot.tree.command(name="removeplayer")
 async def removeplayer(interaction: discord.Interaction, spot: int):
     await interaction.response.defer(ephemeral=True)
     lb = get_lb(interaction.guild.id)
+    if not lb: return
     idx = next((i for i, s in enumerate(lb["spots"]) if s["num"] == spot), None)
     if idx is not None:
         lb["spots"][idx] = vacant_spot(spot)
         set_lb(interaction.guild.id, lb)
-        await refresh_leaderboard(interaction.guild)
-        await interaction.followup.send("✅ Removed.")
+        asyncio.create_task(refresh_leaderboard(interaction.guild))
+        await interaction.followup.send("✅ Removed player.")
 
-# --- FLAGS DROPDOWN LOGIC ---
+# --- FLAGS ---
 class FlagDropdown(discord.ui.Select):
     def __init__(self):
         options = [
